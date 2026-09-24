@@ -38,8 +38,7 @@ struct {
     __uint(max_entries, 1024);
 } RingBuf SEC(".maps");
 
-static __always_inline int isMacEqual(const u8 *mac1, const u8 *mac2)
-{
+static __always_inline int isMacEqual(const u8 *mac1, const u8 *mac2) {
     return mac1[0] == mac2[0] &&
            mac1[1] == mac2[1] &&
            mac1[2] == mac2[2] &&
@@ -47,7 +46,35 @@ static __always_inline int isMacEqual(const u8 *mac1, const u8 *mac2)
            mac1[4] == mac2[4] &&
            mac1[5] == mac2[5];
 }
+static __always_inline u8 getTcpFlags(const struct tcphdr *tcp) {
+    u8 flags = 0;
 
+    if (tcp->fin)
+        flags |= TCP_FLAG_FIN;
+
+    if (tcp->syn)
+        flags |= TCP_FLAG_SYN;
+
+    if (tcp->rst)
+        flags |= TCP_FLAG_RST;
+
+    if (tcp->psh)
+        flags |= TCP_FLAG_PSH;
+
+    if (tcp->ack)
+        flags |= TCP_FLAG_ACK;
+
+    if (tcp->urg)
+        flags |= TCP_FLAG_URG;
+
+    if (tcp->ece)
+        flags |= TCP_FLAG_ECE;
+
+    if (tcp->cwr)
+        flags |= TCP_FLAG_CWR;
+
+    return flags;
+}
 static int checkLayer2Rules(__u64 index, void *data)
 {
     struct loopLayer2Ctx *lctx = (struct loopLayer2Ctx *)data;
@@ -88,8 +115,7 @@ static int checkLayer2Rules(__u64 index, void *data)
     return 1; /* stop loop */
 }
 
-static int checkLayer3Rules(__u64 index, void *data)
-{
+static int checkLayer3Rules(__u64 index, void *data) {
     struct loopL4L3Ctx *lctx = (struct loopL4L3Ctx *)data;
     u32 i = (u32)index;
     struct ACEL3L4 *ace = bpf_map_lookup_elem(&ACLL3L4, &i);
@@ -106,12 +132,14 @@ static int checkLayer3Rules(__u64 index, void *data)
     if (ace->dstIP != 0 && lctx->ip->daddr != ace->dstIP)
         return 0;
 
+    u8 pktFlags =0;
     if (ace->dstPort != 0 || ace->srcPort != 0) {
         u16 src_port = 0;
         u16 dst_port = 0;
         if (lctx->ip->protocol == IP_PROTO_TCP && lctx->tcp) {
             src_port = lctx->tcp->source;
             dst_port = lctx->tcp->dest;
+            u8 pktFlags = getTcpFlags(lctx->tcp);
         } else if (lctx->ip->protocol == IP_PROTO_UDP && lctx->udp) {
             src_port = lctx->udp->source;
             dst_port = lctx->udp->dest;
@@ -121,6 +149,10 @@ static int checkLayer3Rules(__u64 index, void *data)
         if (ace->srcPort != 0 && src_port != ace->srcPort)
             return 0;
     }
+    // every bit set in ace->flags must also be set in pktFlags
+    if (ace->flags != 0)
+        if ((pktFlags & ace->flags) != ace->flags)
+            return 0;
 
     /* First matching ACE wins */
     if (ace->action) {
@@ -137,12 +169,15 @@ static int checkLayer3Rules(__u64 index, void *data)
             if (lctx->tcp) {
                 report->l3.srcPort = lctx->tcp->source;
                 report->l3.dstPort = lctx->tcp->dest;
+                report->l3.flags = pktFlags;
             } else if (lctx->udp) {
                 report->l3.srcPort = lctx->udp->source;
                 report->l3.dstPort = lctx->udp->dest;
+                report->l3.flags   = 0;
             } else {
                 report->l3.srcPort = 0;
                 report->l3.dstPort = 0;
+                report->l3.flags   = 0;
             }
             report->l3.protocol = lctx->ip->protocol;
             bpf_ringbuf_submit(report, 0);
@@ -215,7 +250,7 @@ int packetFilterIngress(struct xdp_md *ctx)
         .tcp = tcp,
         .udp = udp,
         .direction = 0,
-        .result = -1,          /* undecided */
+        .result = -1,
     };
     bpf_loop(MAX_ENTRIES, checkLayer3Rules, &lctx3, 0);
 
@@ -231,12 +266,15 @@ int packetFilterIngress(struct xdp_md *ctx)
             if (tcp) {
                 report->l3.srcPort = tcp->source;
                 report->l3.dstPort = tcp->dest;
+                report->l3.flags   = getTcpFlags(tcp);
             } else if (udp) {
                 report->l3.srcPort = udp->source;
                 report->l3.dstPort = udp->dest;
+                report->l3.flags   = 0;
             } else {
                 report->l3.srcPort = 0;
                 report->l3.dstPort = 0;
+                report->l3.flags   = 0;
             }
             report->l3.protocol = ip->protocol;
             bpf_ringbuf_submit(report, 0);
@@ -262,7 +300,7 @@ int packetFilterEgress(struct __sk_buff *ctx)
     struct loopLayer2Ctx lctx2 = {
         .eth = eth,
         .direction = 1,
-        .result = -1,          /* undecided */
+        .result = -1,
     };
     bpf_loop(MAX_ENTRIES, checkLayer2Rules, &lctx2, 0);
 
@@ -283,7 +321,6 @@ int packetFilterEgress(struct __sk_buff *ctx)
     if (lctx2.result != TC_ACT_OK)
         return TC_ACT_SHOT;
 
-    /* Non-IP that passed L2 → allow */
     if (eth->h_proto != ETH_P_IP)
         return TC_ACT_OK;
 
@@ -329,12 +366,15 @@ int packetFilterEgress(struct __sk_buff *ctx)
             if (tcp) {
                 report->l3.srcPort = tcp->source;
                 report->l3.dstPort = tcp->dest;
+                report->l3.flags = getTcpFlags(tcp);
             } else if (udp) {
                 report->l3.srcPort = udp->source;
                 report->l3.dstPort = udp->dest;
+                report->l3.flags = 0;
             } else {
                 report->l3.srcPort = 0;
                 report->l3.dstPort = 0;
+                report->l3.flags = 0;
             }
             report->l3.protocol = ip->protocol;
             bpf_ringbuf_submit(report, 0);
@@ -342,7 +382,7 @@ int packetFilterEgress(struct __sk_buff *ctx)
         return TC_ACT_SHOT;
     }
     if (lctx3.result != TC_ACT_OK)
-        return TC_ACT_SHOT;    /* explicit deny already reported */
+        return TC_ACT_SHOT;    //explicit deny already reported
 
     return TC_ACT_OK;
 }

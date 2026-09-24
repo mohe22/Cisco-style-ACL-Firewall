@@ -27,6 +27,15 @@ typedef uint64_t u64;
 
 
 
+#define TCP_FLAG_FIN (1u << 0)  // 0b00000001 = 0x01
+#define TCP_FLAG_SYN (1u << 1)  // 0b00000010 = 0x02
+#define TCP_FLAG_RST (1u << 2)  // 0b00000100 = 0x04
+#define TCP_FLAG_PSH (1u << 3)  // 0b00001000 = 0x08
+#define TCP_FLAG_ACK (1u << 4)  // 0b00010000 = 0x10
+#define TCP_FLAG_URG (1u << 5)  // 0b00100000 = 0x20
+#define TCP_FLAG_ECE (1u << 6)  // 0b01000000 = 0x40
+#define TCP_FLAG_CWR (1u << 7)  // 0b10000000 = 0x80
+
 #define MAX_ENTRIES 50
 
 /* Layer-3 ACL rule */
@@ -68,6 +77,7 @@ struct Report {
             __be32 srcIP;
             __be32 dstIP;
             __be16 dstPort;
+            u8 flags;
             __be16 srcPort;
             u8 protocol;
         } l3;

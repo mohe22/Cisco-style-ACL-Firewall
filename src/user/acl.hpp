@@ -21,17 +21,8 @@ class AclTable {
 public:
     bool initialize(int fd) {
         fd_ = fd;
-        entries_.clear();
 
-        if (fd_ < 0)
-            return false;
-
-        const T empty = makeEmptyEntry<T>();
-
-        for (u32 i = 0; i < MAX_ENTRIES; ++i) {
-            if (!write(i, empty))
-                return false;
-        }
+        fetch();
 
         return true;
     }
@@ -41,14 +32,16 @@ public:
             return false;
 
         std::vector<T> backup = entries_;
-        entries_.insert(entries_.begin() + static_cast<std::ptrdiff_t>(index), rule);
+        entries_.insert(entries_.begin() + index, rule);
 
-        for (size_t i = entries_.size(); i-- > index;) {
-            if (!write(static_cast<u32>(i), entries_[i])) {
-                entries_ = std::move(backup);
-                rewriteAll();
-                return false;
-            }
+        bool ok = true;
+
+        for (size_t i = index; i < entries_.size() && ok; ++i)
+              ok = write(static_cast<u32>(i), entries_[i]);
+        if (!ok) {
+            entries_ = std::move(backup);
+            rewriteAll();
+            return false;
         }
 
         return true;
@@ -59,7 +52,7 @@ public:
             return false;
 
         std::vector<T> backup = entries_;
-        entries_.erase(entries_.begin() + static_cast<std::ptrdiff_t>(index));
+        entries_.erase(entries_.begin() + index);
 
         bool ok = true;
 
@@ -97,6 +90,45 @@ public:
         return entries_;
     }
 
+    bool refresh() {
+        if (fd_ < 0)
+            return false;
+
+        const T empty = makeEmptyEntry<T>();
+        bool ok = true;
+
+        for (u32 i = 0; i < MAX_ENTRIES; ++i) {
+            const T& value = (i < entries_.size()) ? entries_[i] : empty;
+            if (!write(i, value))
+                ok = false;
+        }
+
+        return ok;
+    }
+
+    bool fetch() {
+        if (fd_ < 0)
+            return false;
+
+        std::vector<T> fresh;
+        fresh.reserve(entries_.size());
+
+        bool ok = true;
+
+        for (u32 i = 0; i < MAX_ENTRIES; ++i) {
+            T value{};
+            if (!read(i, value)) {
+                ok = false;
+                continue;
+            }
+
+            if (value.enabled)
+                fresh.push_back(value);
+        }
+
+        entries_ = std::move(fresh);
+        return ok;
+    }
 private:
     int fd_{-1};
     std::vector<T> entries_;
@@ -104,7 +136,9 @@ private:
     bool write(u32 key, const T& value) const {
         return bpf_map_update_elem(fd_, &key, &value, BPF_ANY) == 0;
     }
-
+    bool read(u32 key, T& value) const {
+         return bpf_map_lookup_elem(fd_, &key, &value) == 0;
+     }
     void rewriteAll() {
         const T empty = makeEmptyEntry<T>();
 

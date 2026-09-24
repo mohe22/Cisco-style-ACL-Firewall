@@ -377,8 +377,10 @@ bool EbpfLoader::validate(const ACEL2& rule) noexcept {
 
 int EbpfLoader::handleReport(void* ctx, void* data, size_t len) {
     auto* loader = static_cast<EbpfLoader*>(ctx);
+
     if (len < sizeof(Report)) {
-        loader->logger_.error("Invalid report size: " + std::to_string(len));
+        loader->logger_.error("Invalid report size: " + std::to_string(len) +
+                               " (expected " + std::to_string(sizeof(Report)) + ")");
         return 0;
     }
 
@@ -405,7 +407,6 @@ int EbpfLoader::handleReport(void* ctx, void* data, size_t len) {
             report->l2.dstMAC[4], report->l2.dstMAC[5]);
 
         char etherType[7];
-
         std::snprintf(etherType, sizeof(etherType),
             "0x%04x", ntohs(report->l2.etherType));
 
@@ -433,14 +434,19 @@ int EbpfLoader::handleReport(void* ctx, void* data, size_t len) {
 
         if (report->l3.dstPort != 0)
             message += ":" + std::to_string(ntohs(report->l3.dstPort));
+
+        if (report->l3.protocol == IP_PROTO_TCP && report->l3.flags != 0)
+            message += " flags " + flagsToString(report->l3.flags);
     }
     else {
-        loader->logger_.error("Unknown report type: " + std::to_string(report->type));
+        loader->logger_.error("Unknown report type: " + std::to_string(report->type) +
+                               " (ACE " + std::to_string(report->aceIndex) + ")");
         return 0;
     }
 
     message += " (ACE " + std::to_string(report->aceIndex) + ", " +
-               directionToString(report->direction) + ")";
+               directionToString(report->direction) +
+               ", dropped-at " + formatKtime(report->timestamp) + ")";
 
     loader->logger_.denied(message);
 

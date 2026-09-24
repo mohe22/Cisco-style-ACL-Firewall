@@ -7,8 +7,10 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <thread>
+#include <unistd.h>
 
 static std::atomic<bool> gRunning{true};
 
@@ -17,6 +19,27 @@ static void onSignal(int) {
 }
 
 using Args = std::vector<std::string>;
+
+namespace Color {
+    static bool enabled = isatty(fileno(stdout));
+
+    inline std::string wrap(const char* code, const std::string& s) {
+        if (!enabled) return s;
+        return std::string(code) + s + "\033[0m";
+    }
+
+    constexpr const char* Bold  = "\033[1m";
+    constexpr const char* Green = "\033[32m";
+    constexpr const char* Red  = "\033[31m";
+    constexpr const char* Yellow = "\033[33m";
+    constexpr const char* Cyan = "\033[36m";
+    constexpr const char* Dim = "\033[2m";
+    constexpr const char* Reset  = "\033[0m";
+}
+
+static std::string c(const char* code, const std::string& s) {
+    return Color::wrap(code, s);
+}
 
 static bool parseIndex(const std::string& token, size_t endValue, bool allowEnd, size_t& out) {
     if (allowEnd && token == "end") {
@@ -53,6 +76,40 @@ static bool parseMac(const std::string& text, u8 (&mac)[6]) {
             return false;
 
         mac[i] = static_cast<u8>(std::strtoul(text.substr(pos, 2).c_str(), nullptr, 16));
+    }
+
+    return true;
+}
+
+static bool parseFlags(const std::string& text, u8& flags) {
+    flags = 0;
+
+    if (text == "any")
+        return true;
+
+    size_t start = 0;
+
+    while (start < text.size()) {
+        size_t comma = text.find(',', start);
+        std::string token = text.substr(start, comma - start);
+
+        std::transform(token.begin(), token.end(), token.begin(),
+            [](unsigned char c) { return std::tolower(c); });
+
+        if (token == "fin") flags |= TCP_FLAG_FIN;
+        else if (token == "syn") flags |= TCP_FLAG_SYN;
+        else if (token == "rst") flags |= TCP_FLAG_RST;
+        else if (token == "psh") flags |= TCP_FLAG_PSH;
+        else if (token == "ack") flags |= TCP_FLAG_ACK;
+        else if (token == "urg") flags |= TCP_FLAG_URG;
+        else if (token == "ece") flags |= TCP_FLAG_ECE;
+        else if (token == "cwr") flags |= TCP_FLAG_CWR;
+        else return false;
+
+        if (comma == std::string::npos)
+            break;
+
+        start = comma + 1;
     }
 
     return true;
@@ -155,6 +212,7 @@ static std::string formatL3L4(size_t index, const ACEL3L4& rule) {
            portToCiscoString(rule.srcPort) + " " +
            ipToCiscoString(rule.dstIP) +
            portToCiscoString(rule.dstPort) + " " +
+           "flags " + flagsToString(rule.flags) + " " +
            directionToString(rule.direction);
 }
 
@@ -165,6 +223,10 @@ static std::string formatL2(size_t index, const ACEL2& rule) {
            macToString(rule.dstMAC) + " ethertype " +
            etherTypeToString(rule.etherType) + " " +
            directionToString(rule.direction);
+}
+
+static std::string colorAction(uint8_t action) {
+    return action ? c(Color::Green, "permit") : c(Color::Red, "deny  ");
 }
 
 static bool parseHeader(const Args& a, uint8_t& action, uint8_t& direction, std::string& err) {
@@ -189,7 +251,8 @@ static bool parseHeader(const Args& a, uint8_t& action, uint8_t& direction, std:
 
 static bool parseL3Rule(const Args& a, ACEL3L4& rule, std::string& err) {
     if (a.size() < 5) {
-        err = "usage: <add|update> l3 <index> <permit|deny> <in|out> <protocol> [src <ip|any>] [sport <port|any>] [dst <ip|any>] [dport <port|any>]";
+        err = "usage: <add|update> l3 <index> <permit|deny> <in|out> <protocol> "
+              "[src <ip|any>] [sport <port|any>] [dst <ip|any>] [dport <port|any>] [flags <list|any>]";
         return false;
     }
 
@@ -239,6 +302,21 @@ static bool parseL3Rule(const Args& a, ACEL3L4& rule, std::string& err) {
                 err = "invalid destination port '" + value + "'";
                 return false;
             }
+        }
+        else if (key == "flags") {
+            u8 parsedFlags = 0;
+
+            if (!parseFlags(value, parsedFlags)) {
+                err = "invalid flags '" + value + "' (comma list of fin,syn,rst,psh,ack,urg,ece,cwr or 'any')";
+                return false;
+            }
+
+            if (parsedFlags != 0 && rule.protocol != IP_PROTO_TCP) {
+                err = "flags require protocol tcp";
+                return false;
+            }
+
+            rule.flags = parsedFlags;
         }
         else {
             err = "unknown option '" + key + "'";
@@ -299,40 +377,110 @@ static bool parseL2Rule(const Args& a, ACEL2& rule, std::string& err) {
         }
     }
 
-
     return true;
 }
 
 static void showL3L4(const EbpfLoader& loader) {
     auto rules = loader.getACEL3L4();
 
-    std::cout << "ACL L3/L4 (" << rules.size() << " entries)\n";
+    std::cout << "\n" << c(Color::Bold, "ACL L3/L4") << "  "
+               << c(Color::Dim, "(" + std::to_string(rules.size()) + " entries)") << "\n";
 
-    for (size_t i = 0; i < rules.size(); ++i)
-        std::cout << "  " << formatL3L4(i, rules[i]) << '\n';
+    if (rules.empty()) {
+        std::cout << c(Color::Dim, "  (no rules)\n");
+        return;
+    }
+
+    std::cout << c(Color::Dim,
+        (std::ostringstream{}
+            << std::left
+            << std::setw(4)  << "IDX"
+            << std::setw(9)  << "ACTION"
+            << std::setw(6)  << "PROTO"
+            << std::setw(24) << "SOURCE"
+            << std::setw(24) << "DESTINATION"
+            << std::setw(18) << "FLAGS"
+            << std::setw(4)  << "DIR").str())
+        << "\n";
+    std::cout << c(Color::Dim, std::string(89, '-')) << "\n";
+
+    for (size_t i = 0; i < rules.size(); ++i) {
+        const auto& r = rules[i];
+
+        std::string src = ipToCiscoString(r.srcIP) + portToCiscoString(r.srcPort);
+        std::string dst = ipToCiscoString(r.dstIP) + portToCiscoString(r.dstPort);
+
+        std::cout << std::left
+                   << std::setw(4)  << i
+                   << colorAction(r.action) << "  "
+                   << std::setw(6)  << protocolToString(r.protocol)
+                   << std::setw(24) << src
+                   << std::setw(24) << dst
+                   << std::setw(18) << flagsToString(r.flags)
+                   << (r.direction == 0 ? "in" : "out")
+                   << "\n";
+    }
+    std::cout << "\n";
 }
 
 static void showL2(const EbpfLoader& loader) {
     auto rules = loader.getACEL2();
 
-    std::cout << "ACL L2 (" << rules.size() << " entries)\n";
+    std::cout << "\n" << c(Color::Bold, "ACL L2") << "  "
+               << c(Color::Dim, "(" + std::to_string(rules.size()) + " entries)") << "\n";
 
-    for (size_t i = 0; i < rules.size(); ++i)
-        std::cout << "  " << formatL2(i, rules[i]) << '\n';
+    if (rules.empty()) {
+        std::cout << c(Color::Dim, "  (no rules)\n");
+        return;
+    }
+
+    std::cout << c(Color::Dim,
+        (std::ostringstream{}
+            << std::left
+            << std::setw(4)  << "IDX"
+            << std::setw(9)  << "ACTION"
+            << std::setw(20) << "SRC MAC"
+            << std::setw(20) << "DST MAC"
+            << std::setw(10) << "ETYPE"
+            << std::setw(4)  << "DIR").str())
+        << "\n";
+    std::cout << c(Color::Dim, std::string(67, '-')) << "\n";
+
+    for (size_t i = 0; i < rules.size(); ++i) {
+        const auto& r = rules[i];
+
+        std::cout << std::left
+                   << std::setw(4)  << i
+                   << colorAction(r.action) << "  "
+                   << std::setw(20) << macToString(r.srcMAC)
+                   << std::setw(20) << macToString(r.dstMAC)
+                   << std::setw(10) << etherTypeToString(r.etherType)
+                   << (r.direction == 0 ? "in" : "out")
+                   << "\n";
+    }
+    std::cout << "\n";
 }
 
 static void printHelp() {
-    std::cout <<
-        "commands:\n"
-        "  show [l2|l3]\n"
-        "  show ace <l2|l3> <index>\n"
-        "  add l3 <index|end> <permit|deny> <in|out> <protocol> [src <ip|any>] [sport <port|any>] [dst <ip|any>] [dport <port|any>]\n"
-        "  add l2 <index|end> <permit|deny> <in|out> [src <mac|any>] [dst <mac|any>] [type <ethertype>]\n"
-        "  update l3 <index> <permit|deny> <in|out> <protocol> [src <ip|any>] [sport <port|any>] [dst <ip|any>] [dport <port|any>]\n"
-        "  update l2 <index> <permit|deny> <in|out> [src <mac|any>] [dst <mac|any>] [type <ethertype>]\n"
-        "  delete <l2|l3> <index>\n"
-        "  help\n"
-        "  exit\n";
+    std::cout << "\n" << c(Color::Bold, "ACL CLI — commands") << "\n"
+        << c(Color::Cyan, "  Show") << "\n"
+        << "    show [l2|l3]                        list rules (both if omitted)\n"
+        << "    show ace <l2|l3> <index>             show a single rule\n\n"
+        << c(Color::Cyan, "  Add / Update (L3)") << "\n"
+        << "    add l3 <index|end> <permit|deny> <in|out> <protocol>\n"
+        << "        [src <ip|any>] [sport <port|any>]\n"
+        << "        [dst <ip|any>] [dport <port|any>] [flags <list|any>]\n"
+        << c(Color::Dim, "        e.g. add l3 0 deny in tcp src 192.168.0.162 dport 80 flags syn") << "\n"
+        << "    update l3 <index> ...                 same options as add\n\n"
+        << c(Color::Cyan, "  Add / Update (L2)") << "\n"
+        << "    add l2 <index|end> <permit|deny> <in|out>\n"
+        << "        [src <mac|any>] [dst <mac|any>] [type <ethertype>]\n"
+        << "    update l2 <index> ...                 same options as add\n\n"
+        << c(Color::Cyan, "  Manage") << "\n"
+        << "    delete <l2|l3> <index>               remove a rule (asks to confirm)\n"
+        << "    help | ?                             show this message\n"
+        << "    exit                                  quit\n\n"
+        << c(Color::Dim, "  flags: fin,syn,rst,psh,ack,urg,ece,cwr (comma list) or 'any'") << "\n";
 }
 
 static void handleShow(const EbpfLoader& loader, const Args& tokens) {
@@ -364,7 +512,7 @@ static void handleShowAce(const EbpfLoader& loader, const Args& a) {
     size_t index = 0;
 
     if (!parseIndex(a[1], 0, false, index)) {
-        std::cout << "invalid index\n";
+        std::cout << c(Color::Red, "invalid index") << "\n";
         return;
     }
 
@@ -374,7 +522,7 @@ static void handleShowAce(const EbpfLoader& loader, const Args& a) {
         if (rule)
             std::cout << formatL2(index, *rule) << '\n';
         else
-            std::cout << "ACE not found\n";
+            std::cout << c(Color::Red, "ACE not found") << "\n";
 
         return;
     }
@@ -384,7 +532,7 @@ static void handleShowAce(const EbpfLoader& loader, const Args& a) {
     if (rule)
         std::cout << formatL3L4(index, *rule) << '\n';
     else
-        std::cout << "ACE not found\n";
+        std::cout << c(Color::Red, "ACE not found") << "\n";
 }
 
 static void handleAddUpdate(EbpfLoader& loader, const Args& a, bool isAdd) {
@@ -400,7 +548,7 @@ static void handleAddUpdate(EbpfLoader& loader, const Args& a, bool isAdd) {
     size_t index = 0;
 
     if (!parseIndex(a[1], count, isAdd, index)) {
-        std::cout << "invalid index\n";
+        std::cout << c(Color::Red, "invalid index") << "\n";
         return;
     }
 
@@ -411,7 +559,7 @@ static void handleAddUpdate(EbpfLoader& loader, const Args& a, bool isAdd) {
         ACEL2 rule{};
 
         if (!parseL2Rule(a, rule, err)) {
-            std::cout << err << '\n';
+            std::cout << c(Color::Red, err) << "\n";
             return;
         }
 
@@ -421,7 +569,7 @@ static void handleAddUpdate(EbpfLoader& loader, const Args& a, bool isAdd) {
         ACEL3L4 rule{};
 
         if (!parseL3Rule(a, rule, err)) {
-            std::cout << err << '\n';
+            std::cout << c(Color::Red, err) << "\n";
             return;
         }
 
@@ -429,9 +577,10 @@ static void handleAddUpdate(EbpfLoader& loader, const Args& a, bool isAdd) {
     }
 
     if (ok)
-        std::cout << (isAdd ? "ACE added\n" : "ACE updated\n");
+        std::cout << c(Color::Green, isAdd ? "ACE added" : "ACE updated") << "\n";
     else
-        std::cout << "failed to " << verb << " ACE (index out of range, table full, or invalid rule)\n";
+        std::cout << c(Color::Red, std::string("failed to ") + verb +
+                        " ACE (index out of range, table full, or invalid rule)") << "\n";
 }
 
 static void handleDelete(EbpfLoader& loader, const Args& a) {
@@ -443,13 +592,39 @@ static void handleDelete(EbpfLoader& loader, const Args& a) {
     size_t index = 0;
 
     if (!parseIndex(a[1], 0, false, index)) {
-        std::cout << "invalid index\n";
+        std::cout << c(Color::Red, "invalid index") << "\n";
+        return;
+    }
+
+    if (a[0] == "l2") {
+        auto rule = loader.getACEL2At(index);
+        if (!rule) {
+            std::cout << c(Color::Red, "ACE not found") << "\n";
+            return;
+        }
+        std::cout << "  " << formatL2(index, *rule) << "\n";
+    } else {
+        auto rule = loader.getACEL3L4At(index);
+        if (!rule) {
+            std::cout << c(Color::Red, "ACE not found") << "\n";
+            return;
+        }
+        std::cout << "  " << formatL3L4(index, *rule) << "\n";
+    }
+
+    std::cout << c(Color::Yellow, "delete this rule? [y/N] ") << std::flush;
+
+    std::string confirm;
+    std::getline(std::cin, confirm);
+
+    if (confirm != "y" && confirm != "Y") {
+        std::cout << "cancelled\n";
         return;
     }
 
     bool ok = a[0] == "l2" ? loader.removeACEL2(index) : loader.removeACEL3L4(index);
 
-    std::cout << (ok ? "ACE deleted\n" : "failed to delete ACE\n");
+    std::cout << (ok ? c(Color::Green, "ACE deleted") : c(Color::Red, "failed to delete ACE")) << "\n";
 }
 
 int main(int argc, char** argv) {
@@ -495,7 +670,7 @@ int main(int argc, char** argv) {
         std::string line;
 
         while (gRunning.load()) {
-            std::cout << "acl> " << std::flush;
+            std::cout << c(Color::Bold, "") << c(Color::Cyan, "acl> ") << std::flush;
 
             if (!std::getline(std::cin, line))
                 break;
@@ -535,12 +710,12 @@ int main(int argc, char** argv) {
                         gRunning.store(false);
                         break;
                     case Action::Unknown:
-                        std::cout << "unknown command, type 'help'\n";
+                        std::cout << c(Color::Yellow, "unknown command, type 'help'") << "\n";
                         break;
                 }
             }
             catch (const std::exception& e) {
-                std::cerr << "error: " << e.what() << '\n';
+                std::cerr << c(Color::Red, std::string("error: ") + e.what()) << '\n';
             }
         }
 
