@@ -8,8 +8,7 @@ A stateless layer 2 and layer 3-4 access control firewall build with eBPF (XDP f
 - TCP flag matching (SYN, ACK, FIN, RST, PSH, URG, ECE, CWR). For example `flags syn` matches any packet with SYN set
 - First-match-wins rule evaluation, Cisco ACL semantics (`permit`/`deny`, `in`/`out`)
 - Denied packets are reported via a BPF ring buffer and logged with kernel-accurate timestamps
-- Interactive CLI
-
+- Interactive CLI.
 ## Project structure
 ```
 acl/
