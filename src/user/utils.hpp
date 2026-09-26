@@ -34,3 +34,12 @@ enum class Action : uint8_t {
 [[nodiscard]] std::string portToCiscoString(uint16_t port) noexcept;
 [[nodiscard]] std::string flagsToString(uint8_t flags) noexcept;
 [[nodiscard]] std::string formatKtime(u64 ktimeNs) noexcept;
+bool parseMac(const std::string& text, u8 (&mac)[6]) noexcept;
+bool parseFlags(const std::string& text, u8& flags) noexcept;
+bool parsePort(const std::string& text, __be16& port) noexcept;
+bool parseEtherType(const std::string& text, __be16& etherType) noexcept;
+std::string macToString(const u8 (&mac)[6]) noexcept ;
+std::string etherTypeToString(__be16 etherType) noexcept;
+std::string formatL3L4(size_t index, const ACEL3L4& rule) noexcept ;
+std::string formatL2(size_t index, const ACEL2& rule) noexcept;
+bool parseIp(const std::string& text, __be32& ip) noexcept;

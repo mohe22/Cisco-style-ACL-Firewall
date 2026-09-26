@@ -90,22 +90,6 @@ public:
         return entries_;
     }
 
-    bool refresh() {
-        if (fd_ < 0)
-            return false;
-
-        const T empty = makeEmptyEntry<T>();
-        bool ok = true;
-
-        for (u32 i = 0; i < MAX_ENTRIES; ++i) {
-            const T& value = (i < entries_.size()) ? entries_[i] : empty;
-            if (!write(i, value))
-                ok = false;
-        }
-
-        return ok;
-    }
-
     bool fetch() {
         if (fd_ < 0)
             return false;

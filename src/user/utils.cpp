@@ -5,6 +5,7 @@
 #include <cctype>
 #include <charconv>
 #include <chrono>
+#include <cstring>
 #include <ctime>
 #include <iomanip>
 #include <ranges>
@@ -212,4 +213,190 @@ std::string formatKtime(u64 ktimeNs) noexcept {
         << '.' << std::setw(3) << std::setfill('0') << ms.count();
 
     return oss.str();
+}
+
+bool parseMac(const std::string& text, u8 (&mac)[6]) noexcept {
+    if (text == "any") {
+        std::memset(mac, 0, 6);
+        return true;
+    }
+
+    if (text.size() != 17)
+        return false;
+
+    for (size_t i = 0; i < 6; ++i) {
+        size_t pos = i * 3;
+
+        if (!std::isxdigit(static_cast<unsigned char>(text[pos])) ||
+            !std::isxdigit(static_cast<unsigned char>(text[pos + 1])))
+            return false;
+
+        if (i < 5 && text[pos + 2] != ':')
+            return false;
+
+        unsigned int byte = 0;
+        auto [ptr, ec] = std::from_chars(text.data() + pos, text.data() + pos + 2, byte, 16);
+
+        if (ec != std::errc{})
+            return false;
+
+        mac[i] = static_cast<u8>(byte);
+    }
+
+    return true;
+}
+
+bool parseFlags(const std::string& text, u8& flags) noexcept {
+    flags = 0;
+
+    if (text == "any")
+        return true;
+
+    size_t start = 0;
+
+    while (start < text.size()) {
+        size_t comma = text.find(',', start);
+        std::string token = text.substr(start, comma - start);
+
+        std::transform(token.begin(), token.end(), token.begin(),
+            [](unsigned char c) { return std::tolower(c); });
+
+        if (token == "fin") flags |= TCP_FLAG_FIN;
+        else if (token == "syn") flags |= TCP_FLAG_SYN;
+        else if (token == "rst") flags |= TCP_FLAG_RST;
+        else if (token == "psh") flags |= TCP_FLAG_PSH;
+        else if (token == "ack") flags |= TCP_FLAG_ACK;
+        else if (token == "urg") flags |= TCP_FLAG_URG;
+        else if (token == "ece") flags |= TCP_FLAG_ECE;
+        else if (token == "cwr") flags |= TCP_FLAG_CWR;
+        else return false;
+
+        if (comma == std::string::npos)
+            break;
+
+        start = comma + 1;
+    }
+
+    return true;
+}
+
+
+
+
+bool parseIp(const std::string& text, __be32& ip) noexcept {
+    if (text == "any") {
+        ip = 0;
+        return true;
+    }
+
+    in_addr addr{};
+
+    if (inet_pton(AF_INET, text.c_str(), &addr) != 1)
+        return false;
+
+    if (addr.s_addr == 0)
+        return false;
+
+    ip = addr.s_addr;
+    return true;
+}
+
+bool parsePort(const std::string& text, __be16& port) noexcept {
+    if (text == "any") {
+        port = 0;
+        return true;
+    }
+
+    int value = toInt(text);
+
+    if (value < 1 || value > 65535)
+        return false;
+
+    port = htons(static_cast<uint16_t>(value));
+    return true;
+}
+
+bool parseEtherType(const std::string& text, __be16& etherType) noexcept {
+    if (text == "any") {
+        etherType = 0;
+        return true;
+    }
+
+    unsigned long value = 0;
+
+    if (text == "ip" || text == "ipv4")
+        value = 0x0800;
+    else if (text == "arp")
+        value = 0x0806;
+    else if (text == "ipv6")
+        value = 0x86DD;
+    else {
+        if (text.empty())
+            return false;
+
+        int base = 10;
+        std::string_view sv = text;
+
+        if (sv.starts_with("0x") || sv.starts_with("0X")) {
+            sv.remove_prefix(2);
+            base = 16;
+        }
+
+        unsigned int parsed = 0;
+        auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), parsed, base);
+
+        if (ec != std::errc{} || ptr != sv.data() + sv.size())
+            return false;
+
+        value = parsed;
+    }
+
+    if (value == 0 || value > 0xFFFF)
+        return false;
+
+    etherType = htons(static_cast<uint16_t>(value));
+    return true;
+}
+
+std::string macToString(const u8 (&mac)[6]) noexcept {
+    static const u8 zero[6] = {};
+
+    if (std::memcmp(mac, zero, 6) == 0)
+        return "any";
+
+    char buffer[18];
+
+    std::snprintf(buffer, sizeof(buffer), "%02x:%02x:%02x:%02x:%02x:%02x",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    return buffer;
+}
+std::string etherTypeToString(__be16 etherType) noexcept {
+    if (etherType == 0)
+        return "any";
+
+    char buffer[7];
+    std::snprintf(buffer, sizeof(buffer), "0x%04x", ntohs(etherType));
+
+    return buffer;
+}
+std::string formatL3L4(size_t index, const ACEL3L4& rule) noexcept {
+    return "[" + std::to_string(index) + "] " +
+           actionToString(rule.action) + " " +
+           protocolToString(rule.protocol) + " " +
+           ipToCiscoString(rule.srcIP) +
+           portToCiscoString(rule.srcPort) + " " +
+           ipToCiscoString(rule.dstIP) +
+           portToCiscoString(rule.dstPort) + " " +
+           "flags " + flagsToString(rule.flags) + " " +
+           directionToString(rule.direction);
+}
+
+std::string formatL2(size_t index, const ACEL2& rule) noexcept{
+    return "[" + std::to_string(index) + "] " +
+           actionToString(rule.action) + " ethernet " +
+           macToString(rule.srcMAC) + " " +
+           macToString(rule.dstMAC) + " ethertype " +
+           etherTypeToString(rule.etherType) + " " +
+           directionToString(rule.direction);
 }

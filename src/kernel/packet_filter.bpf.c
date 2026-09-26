@@ -80,6 +80,7 @@ static int checkLayer2Rules(__u64 index, void *data)
     struct loopLayer2Ctx *lctx = (struct loopLayer2Ctx *)data;
     u32 i = (u32)index;
     struct ACEL2 *ace = bpf_map_lookup_elem(&ACLL2, &i);
+
     if (!ace)
         return 0;
     if (!ace->enabled)
@@ -132,14 +133,14 @@ static int checkLayer3Rules(__u64 index, void *data) {
     if (ace->dstIP != 0 && lctx->ip->daddr != ace->dstIP)
         return 0;
 
-    u8 pktFlags =0;
+    u8 pktFlags = 0;
     if (ace->dstPort != 0 || ace->srcPort != 0) {
         u16 src_port = 0;
         u16 dst_port = 0;
         if (lctx->ip->protocol == IP_PROTO_TCP && lctx->tcp) {
             src_port = lctx->tcp->source;
             dst_port = lctx->tcp->dest;
-            u8 pktFlags = getTcpFlags(lctx->tcp);
+            pktFlags = getTcpFlags(lctx->tcp);
         } else if (lctx->ip->protocol == IP_PROTO_UDP && lctx->udp) {
             src_port = lctx->udp->source;
             dst_port = lctx->udp->dest;
